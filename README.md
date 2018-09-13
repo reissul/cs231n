@@ -1,1 +1,1 @@
-playing with cs231n assignments
+playing with cs231n assignments.
