@@ -1,6 +1,27 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torch.utils.data import sampler
 
+import torchvision.datasets as dset
+import torchvision.transforms as T
+import torch.nn.functional as F
+
+import numpy as np
+import queue
+
+import matplotlib.pyplot as plt
+
+USE_GPU = True
+
+dtype = torch.float32 # we will be using float throughout this tutorial
+
+if USE_GPU and torch.cuda.is_available():
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
+    
 def accuracy(loader, model, its=None):
     model.eval() # set each model to evaluation mode
     num_correct = 0
@@ -33,20 +54,22 @@ def train_batch(x, y, model, optimizer):
     optimizer.step()
     return loss
 
-def train(model, optimizer, loader_train, loader_val, epochs=1, its=None, eval_its=None):
+def train(model, optimizer, loader_train, loader_val, epochs=1, its=None,
+          eval_its=None, log_every=100, verbose=False):
     history = History()
     model = model.to(device=device)  # move the model parameters to CPU/GPU
     for e in range(epochs):
         for t, (x, y) in enumerate(loader_train):
             break_its = its is not None and t > its
             loss = train_batch(x, y, model, optimizer)
-            if t % print_every == 0 or break_its:
+            if t % log_every == 0 or break_its:
                 _, train_acc = accuracy(loader_train, model, its=eval_its)
                 preds, val_acc = accuracy(loader_val, model, its=eval_its)
-                history.update(loss, train_acc, val_acc, preds)
-                print('It %d, loss = %.4f' % (t, loss.item()))
-                print('Train acc \t= %.2f' % history.train_acc)
-                print('Val acc \t= %.2f\n' % history.val_acc)
+                history.update(loss.item(), train_acc, val_acc, preds)
+                if verbose:
+                    print('It %d, loss = %.4f' % (t, loss.item()))
+                    print('Train acc \t= %.2f' % history.train_acc)
+                    print('Val acc \t= %.2f\n' % history.val_acc)
             if break_its: break
     return history
 
@@ -58,14 +81,15 @@ class Flatten(nn.Module):
     def forward(self, x):
         return flatten(x)
 
-def construct_model(parameters, im_shape):
+def construct_model(parameters, im_shape, num_classes):
 
     (channels, im_size, im_size2) = im_shape
     assert(im_size == im_size2)
     
     layers = []
-    
+
     # For each conv pattern.
+    N = parameters["N"]
     for conv_layer in range(N):
         # Filter size and filter count.
         filter_size = parameters["FilterSize"]
@@ -75,7 +99,7 @@ def construct_model(parameters, im_shape):
             continue
         elif parameters["Architecture"] == "batchnorm-relu-conv":
             layers.append(torch.nn.BatchNorm2d(channels))
-            layers.append(layers.nn.ReLU())
+            layers.append(torch.nn.ReLU())
             pad = filter_size // 2
             # TODO: stride and new im_size
             layers.append(nn.Conv2d(channels, filter_count, filter_size, padding=pad))
@@ -85,10 +109,11 @@ def construct_model(parameters, im_shape):
     # For each fc pattern.
     layers.append(Flatten())
     in_dim = channels * im_size * im_size
+    M = parameters["M"]
     for fc_layer in range(M):
         out_dim = parameters["HiddenSize"] if fc_layer < M-1 else num_classes
         layers.append(nn.Linear(in_dim, out_dim))
-        layers.append(nn.Dropout(parameters["Dropout"]))
+        #layers.append(nn.Dropout(parameters["Dropout"]))
         in_dim = out_dim
 
     return nn.Sequential(*layers)
@@ -114,25 +139,21 @@ class History(object):
         return self.val_accs[-1] if self.val_accs else None
     @property
     def bad(self):
-        return (self.val_accs[-1] - self.val_acs[0]) < 5.
+        return 0
+        return (self.val_accs[-1] - self.val_accs[0]) < 5.
     @property
     def working(self):
-        return (self.val_accs[-1] - self.val_acs[0]) > 5.
+        ln = self.losses[-1]
+        l0 = self.losses[0]
+        perc_dec = 100. * (l0 - ln) / l0
+        return perc_dec > 10.
 
 class ChoiceSampler(object):
-    def __init__self(self, choices):
-        self.bad = np.zeros(len(choices))
-        self.tot = np.zeros(len(choices))
+    def __init__(self, choices):
         self.choices = choices
     def sample(self):
-        good = (self.bad / (self.tot+1)) < -1#0.75
-        assert(np.sum(good))
-        ind = np.choice(np.nonzero(good)[0], 1)
+        ind = range(len(self.choices))
         return self.choices[ind]
-    def update(self, bad, val):
-        ind = [i for (i,v) in enumerate(self.choices) if abs(v-val) < 1e-9][0]
-        self.bad[ind] += bad
-        self.tot[ind] += 1
 
 class HyperOpt(object):
     """
@@ -145,13 +166,13 @@ class HyperOpt(object):
       "FilterSize": ChoiceSampler([3, 5]),
       "FilterCount": ChoiceSampler([8, 32, 128]),
     }
-    ho = HyperOpt(samplers)
+    ho = HyperOpt(samplers, construct_model, train, loader_train, loader_val)
     while True:
       ho.step()
       print("Best parameters:", ho.best_parameters)
     """
     def __init__(self, samplers, constructor, trainer, loader_train, loader_val,
-                 max_active=None, coarse_its=None, fine_epochs=10,
+                 max_active=None, coarse_its=None, fine_epochs=10, verbose=False,
                  coarse_fine="contract"):
         """
         Construct a HyperOpt object.
@@ -175,19 +196,37 @@ class HyperOpt(object):
         self.samplers = samplers
         self.constructor = constructor
         self.trainer = trainer
+        self.loader_train = loader_train
+        self.loader_val = loader_val
         self.max_active = max_active
         self.coarse_its = coarse_its
         self.fine_epochs = fine_epochs
-        self.coarse_fine = coarse_finne
+        self.coarse_fine = coarse_fine
+        self.verbose = verbose
         self.fine = False # begin coarse
         self.active = queue.PriorityQueue() # begin with no active
+        self.trained = queue.PriorityQueue() # begin with no trained
         self.results = [] # begin with no results
     def step(self):
-        parameters = self.sample()
-        model = self.constructor(parameters, 32) # TODO: don't hard code?
-        if coarse_fine == "contract":
+
+        """
+        plt.subplot(2, 1, 1)
+        #plt.plot(history.losses, 'o')
+        plt.xlabel('iteration')
+        plt.ylabel('loss')
+        
+        plt.subplot(2, 1, 2)
+        #plt.plot(history.train_acc, '-o')
+        #plt.plot(history.val_acc, '-o')
+        plt.legend(['train', 'val'], loc='upper left')
+        plt.xlabel('epoch')
+        plt.ylabel('accuracy')
+        plt.show()
+        """
+        
+        if self.coarse_fine == "contract":
             # See if we need to reset fine.
-            if not self.fine and len(self.active) == self.max_active:
+            if not self.fine and self.active.qsize() == self.max_active:
                 self.fine = True
             elif self.fine and not self.active:
                 self.fine = False
@@ -195,16 +234,22 @@ class HyperOpt(object):
             if not self.fine:
                 # Find the right learning rate (if there is one).
                 lrs = []
-                while len(lrs) < 3:
-                    lr = 10 ** np.uniform(-6, 1)
+                parameters = self.sample()
+                while len(lrs) < 4:
+                    lr = 10 ** np.random.randint(-6, 1)
                     if lr in lrs: continue
+                    model = self.constructor(parameters, (3,32,32), 10) # TODO: don't hard code?
+                    print(model)
                     optimizer = optim.SGD(model.parameters(), lr=lr,
                                           momentum=0.9, nesterov=True)
                     history = self.trainer(model, optimizer, self.loader_train,
                                            self.loader_val, epochs=1,
-                                           its=self.coarse_its, eval_its=16)
+                                           its=self.coarse_its, eval_its=16,
+                                           verbose=True)#self.verbose)
                     # If it's working, add it to our active set and break.
                     if history.working:
+                        print("\tlr = %.2E" % lr)
+                        print("\t\tworking = %s" % history.working)
                         self.active.put((-history.val_acc, model, optimizer, history))
                         break
             # If we are doing fine search.
@@ -218,7 +263,11 @@ class HyperOpt(object):
             pass # TODO: other coarse/fine strategies.
 
     def sample(self):
-        return dict([(n, p.sample()) for (n, s) in self.samplers.items()])
+        return dict([(n, s.sample()) for (n, s) in self.samplers.items()])
 
-    def update(parameters, hist):
-        [self.samplers[n].update(hist.bad, v) for (n, v) in parameters.items()]
+    @property
+    def best_val_acc(self):
+        if self.trained.qsize():
+            return -self.trained.queue[0][0]
+        else:
+            0.0
