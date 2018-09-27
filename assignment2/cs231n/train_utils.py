@@ -8,22 +8,16 @@ import torchvision.datasets as dset
 import torchvision.transforms as T
 import torch.nn.functional as F
 
+import inspect
+import logging
+import matplotlib.pyplot as plt
 import numpy as np
 import queue
 from numpy.random import randint
 
-import matplotlib.pyplot as plt
+logger = logging.getLogger(__name__)
 
-USE_GPU = True
-
-dtype = torch.float32 # we will be using float throughout this tutorial
-
-if USE_GPU and torch.cuda.is_available():
-    device = torch.device('cuda')
-else:
-    device = torch.device('cpu')
-    
-def accuracy(loader, model, its=None):
+def accuracy(loader, model, device, its=None):
     model.eval() # set each model to evaluation mode
     num_correct = 0
     num_samples = 0
@@ -31,7 +25,7 @@ def accuracy(loader, model, its=None):
     with torch.no_grad():
         for (t, (x, y)) in enumerate(loader):
             break_its = its is not None and t > its
-            x = x.to(device=device, dtype=dtype)  # move
+            x = x.to(device=device, dtype=torch.float32)  # move
             y = y.to(device=device, dtype=torch.long)
             scores = model(x)
             _, p = scores.max(1)
@@ -44,9 +38,9 @@ def accuracy(loader, model, its=None):
             if break_its: break
     return preds, 100 * float(num_correct) / num_samples
 
-def train_batch(x, y, model, optimizer):
+def train_batch(x, y, model, optimizer, device):
     model.train()  # put model to training mode
-    x = x.to(device=device, dtype=dtype)  # move to device, e.g. GPU
+    x = x.to(device=device, dtype=torch.float32)  # move to device, e.g. GPU
     y = y.to(device=device, dtype=torch.long)
     scores = model(x)
     loss = F.cross_entropy(scores, y)
@@ -56,21 +50,23 @@ def train_batch(x, y, model, optimizer):
     return loss
 
 def train(model, optimizer, loader_train, loader_val, epochs=1, its=None,
-          eval_its=None, log_every=100, verbose=False):
+          eval_its=None, log_every=100, verbose=False, device=None):
+    fname = inspect.stack()[0][3]
+    logger.debug('%s:' % (fname))
     history = History()
     model = model.to(device=device)  # move the model parameters to CPU/GPU
     for e in range(epochs):
         for t, (x, y) in enumerate(loader_train):
             break_its = its is not None and t > its
-            loss = train_batch(x, y, model, optimizer)
+            loss = train_batch(x, y, model, optimizer, device)
             if t % log_every == 0 or break_its:
-                _, train_acc = accuracy(loader_train, model, its=eval_its)
-                preds, val_acc = accuracy(loader_val, model, its=eval_its)
+                _, train_acc = accuracy(loader_train, model, device, its=eval_its)
+                preds, val_acc = accuracy(loader_val, model, device, its=eval_its)
                 history.update(loss.item(), train_acc, val_acc, preds)
                 if verbose:
-                    print('It %d, loss = %.4f' % (t, loss.item()))
-                    print('Train acc \t= %.2f' % history.train_acc)
-                    print('Val acc \t= %.2f\n' % history.val_acc)
+                    logger.info('%s: It %d, loss = %.4f' % (fname, t, loss.item()))
+                    logger.info('%s: Train acc \t= %.2f' % (fname, history.train_acc))
+                    logger.info('%s: Val acc \t= %.2f\n' % (fname, history.val_acc))
             if break_its: break
     return history
 
@@ -83,7 +79,8 @@ class Flatten(nn.Module):
         return flatten(x)
 
 def construct_model(parameters, im_shape, num_classes):
-
+    fname = inspect.stack()[0][3]
+    
     (channels, im_size, im_size2) = im_shape
     assert(im_size == im_size2)
     
@@ -149,13 +146,6 @@ class History(object):
         perc_dec = 100. * (l0 - ln) / l0
         return perc_dec > 10.
 
-class ChoiceSampler(object):
-    def __init__(self, choices):
-        self.choices = choices
-    def sample(self):
-        ind = range(len(self.choices))
-        return self.choices[ind]
-
 class HyperOpt(object):
     """
     A hyperparameter optimizer. Includes individual parameter choices,
@@ -172,7 +162,7 @@ class HyperOpt(object):
     """
     def __init__(self, choices, constructor, trainer, loader_train, loader_val,
                  max_active=None, coarse_its=None, fine_epochs=10, verbose=False,
-                 coarse_fine="contract"):
+                 device=torch.device('cpu'), coarse_fine="contract"):
         """
         Construct a HyperOpt object.
         
@@ -193,7 +183,7 @@ class HyperOpt(object):
           - filling: Always keep active at max_active.
         """
         self.choices = choices
-        self.num_choices = np.prod(list(map(len, choices)))
+        self.num_choices = np.prod(list(map(len, choices.values())))
         self.constructor = constructor
         self.trainer = trainer
         self.loader_train = loader_train
@@ -203,6 +193,7 @@ class HyperOpt(object):
         self.fine_epochs = fine_epochs
         self.coarse_fine = coarse_fine
         self.verbose = verbose
+        self.device = device
         self.fine = False # begin coarse
         self.sampled = set([])
         self.active = queue.PriorityQueue() # begin with no active
@@ -213,55 +204,62 @@ class HyperOpt(object):
         """
         Optimize hyperparameters.
         """
+        fname = inspect.stack()[0][3]
+        logger.debug('%s:' % (fname))
         fine = False
-        while len(self.sampled) < num_choices or self.active:
+        sampled_all = False
+        while not (sampled_all and not self.active.qsize()):
             # If the coarse search is done, move to fine.
-            if not fine and self.active.qsize() == self.max_active:
+            if not fine and (self.active.qsize() == self.max_active or sampled_all):
                 fine = True
             # If the fine search is done, move to coarse.
-            elif fine and not self.active:
+            elif fine and not self.active.qsize():
                 fine = False
             # Step.
-            self.coarse_step() if fine else self.fine_step()
+            self.coarse_step() if not fine else self.fine_step()
+            sampled_all = len(self.sampled) == self.num_choices
 
     def coarse_step(self):
-
+        fname = inspect.stack()[0][3]
         # Sample parameters and check if this was sampled previously.
+        logger.debug('%s:' % (fname))
         lrs, parameter_inds, parameter_vals = [], {}, {}
         for (name, vals) in self.choices.items():
-            ind = randint(0, len(self.choices))
+            ind = randint(0, len(vals))
             parameter_inds[name] = ind
             parameter_vals[name] = self.choices[name][ind]
         sample = tuple(sorted(parameter_inds.items()))
         if sample in self.sampled:
             return
-        sampled.add(sample)
+        self.sampled.add(sample)
         
         # Find the right learning rate (if there is one).
         lrs = []
         while len(lrs) < 4:
             lr = 10 ** np.random.randint(-6, 1)
             if lr in lrs: continue
-            model = self.constructor(parameters, (3,32,32), 10) # TODO: don't hard code?
-            print(model)
+            model = self.constructor(parameter_vals, (3,32,32), 10) # TODO: don't hard code?
             optimizer = optim.SGD(model.parameters(), lr=lr,
                                   momentum=0.9, nesterov=True)
             history = self.trainer(model, optimizer, self.loader_train,
                                    self.loader_val, epochs=1,
                                    its=self.coarse_its, eval_its=16,
-                                   verbose=True)#self.verbose)
+                                   verbose=self.verbose, device=self.device)
             # If it's working, add it to our active set and break.
             if history.working:
-                print("\tlr = %.2E" % lr)
-                print("\t\tworking = %s" % history.working)
+                logger.info("%s:\tlr = %.2E" % (fname, lr))
+                logger.info("%s:\t\tworking = %s" % (fname, history.working))
                 self.active.put((-history.val_acc, model, optimizer, history))
                 break
             
     def fine_step(self):
-        _, model, optimizer, history = self.active.get()
+        fname = inspect.stack()[0][3]
+        logger.debug('%s:' % (fname))
+        _, model, optimizer, history = self.active.get_nowait()
         history = self.trainer(model, optimizer, self.loader_train,
                                self.loader_val, epochs=self.fine_epochs,
-                               eval_its=16)
+                               eval_its=16, verbose=self.verbose,
+                               device=self.device)
         self.trained.put((-history.val_acc, model, history))
 
     def step(self):
