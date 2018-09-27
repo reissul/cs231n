@@ -7,6 +7,7 @@ from torch.utils.data import sampler
 import torchvision.datasets as dset
 import torchvision.transforms as T
 import torch.nn.functional as F
+from visdom import Visdom
 
 import inspect
 import logging
@@ -162,7 +163,7 @@ class HyperOpt(object):
     """
     def __init__(self, choices, constructor, trainer, loader_train, loader_val,
                  max_active=None, coarse_its=None, fine_epochs=10, verbose=False,
-                 device=torch.device('cpu'), coarse_fine="contract"):
+                 visualize=True, port=6006, device=torch.device('cpu')):
         """
         Construct a HyperOpt object.
         
@@ -177,10 +178,6 @@ class HyperOpt(object):
         - max_active: Maximum number of active parameter sets.
         - coarse_its: Number of training iterations during coarse phases.
         - fine_epochs: Number of training epochs during fine phases.
-        - coarse_fine: Coarse/fine strategy. One of the following:
-          - contracting: Generate max_active and then complete or kill all,
-            before repeating.
-          - filling: Always keep active at max_active.
         """
         self.choices = choices
         self.num_choices = np.prod(list(map(len, choices.values())))
@@ -191,7 +188,6 @@ class HyperOpt(object):
         self.max_active = max_active
         self.coarse_its = coarse_its
         self.fine_epochs = fine_epochs
-        self.coarse_fine = coarse_fine
         self.verbose = verbose
         self.device = device
         self.fine = False # begin coarse
@@ -199,6 +195,11 @@ class HyperOpt(object):
         self.active = queue.PriorityQueue() # begin with no active
         self.trained = queue.PriorityQueue() # begin with no trained
         self.results = [] # begin with no results
+
+        vis = Visdom(port=port)
+        assert viz.check_connection(), 'No connection could be formed quickly'
+        self.textwindow = viz.text('Hello World!')
+        self.
 
     def optimize(self):
         """
@@ -261,24 +262,6 @@ class HyperOpt(object):
                                eval_its=16, verbose=self.verbose,
                                device=self.device)
         self.trained.put((-history.val_acc, model, history))
-
-    def step(self):
-
-        """
-        plt.subplot(2, 1, 1)
-        #plt.plot(history.losses, 'o')
-        plt.xlabel('iteration')
-        plt.ylabel('loss')
-        
-        plt.subplot(2, 1, 2)
-        #plt.plot(history.train_acc, '-o')
-        #plt.plot(history.val_acc, '-o')
-        plt.legend(['train', 'val'], loc='upper left')
-        plt.xlabel('epoch')
-        plt.ylabel('accuracy')
-        plt.show()
-        """
-        pass
 
     @property
     def best_val_acc(self):
