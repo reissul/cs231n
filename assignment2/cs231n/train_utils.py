@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 import numpy as np
 import queue
+from numpy.random import randint
 
 import matplotlib.pyplot as plt
 
@@ -157,28 +158,26 @@ class ChoiceSampler(object):
 
 class HyperOpt(object):
     """
-    A hyperparameter optimizer. Includes individual parameter samplers,
+    A hyperparameter optimizer. Includes individual parameter choices,
     training routines, and coarse/fine strategies.
     
     Example usage:
 
-    samplers = {
-      "FilterSize": ChoiceSampler([3, 5]),
-      "FilterCount": ChoiceSampler([8, 32, 128]),
+    choices = {
+      "FilterSize": [3, 5],
+      "FilterCount": [8, 32, 128],
     }
-    ho = HyperOpt(samplers, construct_model, train, loader_train, loader_val)
-    while True:
-      ho.step()
-      print("Best parameters:", ho.best_parameters)
+    ho = HyperOpt(choices, construct_model, train, loader_train, loader_val)
+    ho.optimize()
     """
-    def __init__(self, samplers, constructor, trainer, loader_train, loader_val,
+    def __init__(self, choices, constructor, trainer, loader_train, loader_val,
                  max_active=None, coarse_its=None, fine_epochs=10, verbose=False,
                  coarse_fine="contract"):
         """
         Construct a HyperOpt object.
         
         Required arguments:
-        - samplers: Dictionary from parameter name to parameter Sampler
+        - choices: Dictionary from parameter name to parameter choices.
         - constructor: Model constructor function. Must have the following API:
           - constructor(parameters, image_shape)
         - trainer: Model training function. Must have the following API:
@@ -193,7 +192,8 @@ class HyperOpt(object):
             before repeating.
           - filling: Always keep active at max_active.
         """
-        self.samplers = samplers
+        self.choices = choices
+        self.num_choices = np.prod(list(map(len, choices)))
         self.constructor = constructor
         self.trainer = trainer
         self.loader_train = loader_train
@@ -204,9 +204,66 @@ class HyperOpt(object):
         self.coarse_fine = coarse_fine
         self.verbose = verbose
         self.fine = False # begin coarse
+        self.sampled = set([])
         self.active = queue.PriorityQueue() # begin with no active
         self.trained = queue.PriorityQueue() # begin with no trained
         self.results = [] # begin with no results
+
+    def optimize(self):
+        """
+        Optimize hyperparameters.
+        """
+        fine = False
+        while len(self.sampled) < num_choices or self.active:
+            # If the coarse search is done, move to fine.
+            if not fine and self.active.qsize() == self.max_active:
+                fine = True
+            # If the fine search is done, move to coarse.
+            elif fine and not self.active:
+                fine = False
+            # Step.
+            self.coarse_step() if fine else self.fine_step()
+
+    def coarse_step(self):
+
+        # Sample parameters and check if this was sampled previously.
+        lrs, parameter_inds, parameter_vals = [], {}, {}
+        for (name, vals) in self.choices.items():
+            ind = randint(0, len(self.choices))
+            parameter_inds[name] = ind
+            parameter_vals[name] = self.choices[name][ind]
+        sample = tuple(sorted(parameter_inds.items()))
+        if sample in self.sampled:
+            return
+        sampled.add(sample)
+        
+        # Find the right learning rate (if there is one).
+        lrs = []
+        while len(lrs) < 4:
+            lr = 10 ** np.random.randint(-6, 1)
+            if lr in lrs: continue
+            model = self.constructor(parameters, (3,32,32), 10) # TODO: don't hard code?
+            print(model)
+            optimizer = optim.SGD(model.parameters(), lr=lr,
+                                  momentum=0.9, nesterov=True)
+            history = self.trainer(model, optimizer, self.loader_train,
+                                   self.loader_val, epochs=1,
+                                   its=self.coarse_its, eval_its=16,
+                                   verbose=True)#self.verbose)
+            # If it's working, add it to our active set and break.
+            if history.working:
+                print("\tlr = %.2E" % lr)
+                print("\t\tworking = %s" % history.working)
+                self.active.put((-history.val_acc, model, optimizer, history))
+                break
+            
+    def fine_step(self):
+        _, model, optimizer, history = self.active.get()
+        history = self.trainer(model, optimizer, self.loader_train,
+                               self.loader_val, epochs=self.fine_epochs,
+                               eval_its=16)
+        self.trained.put((-history.val_acc, model, history))
+
     def step(self):
 
         """
@@ -223,47 +280,7 @@ class HyperOpt(object):
         plt.ylabel('accuracy')
         plt.show()
         """
-        
-        if self.coarse_fine == "contract":
-            # See if we need to reset fine.
-            if not self.fine and self.active.qsize() == self.max_active:
-                self.fine = True
-            elif self.fine and not self.active:
-                self.fine = False
-            # If we are doing coarse search.
-            if not self.fine:
-                # Find the right learning rate (if there is one).
-                lrs = []
-                parameters = self.sample()
-                while len(lrs) < 4:
-                    lr = 10 ** np.random.randint(-6, 1)
-                    if lr in lrs: continue
-                    model = self.constructor(parameters, (3,32,32), 10) # TODO: don't hard code?
-                    print(model)
-                    optimizer = optim.SGD(model.parameters(), lr=lr,
-                                          momentum=0.9, nesterov=True)
-                    history = self.trainer(model, optimizer, self.loader_train,
-                                           self.loader_val, epochs=1,
-                                           its=self.coarse_its, eval_its=16,
-                                           verbose=True)#self.verbose)
-                    # If it's working, add it to our active set and break.
-                    if history.working:
-                        print("\tlr = %.2E" % lr)
-                        print("\t\tworking = %s" % history.working)
-                        self.active.put((-history.val_acc, model, optimizer, history))
-                        break
-            # If we are doing fine search.
-            else:
-                _, model, optimizer, history = self.active.get()
-                history = self.trainer(model, optimizer, self.loader_train,
-                                       self.loader_val, epochs=self.fine_epochs,
-                                       eval_its=16)
-                self.trained.put((-history.val_acc, model, history))
-        else:
-            pass # TODO: other coarse/fine strategies.
-
-    def sample(self):
-        return dict([(n, s.sample()) for (n, s) in self.samplers.items()])
+        pass
 
     @property
     def best_val_acc(self):
