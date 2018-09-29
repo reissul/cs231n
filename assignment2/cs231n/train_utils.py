@@ -65,24 +65,24 @@ def train(model, optimizer, loader_train, loader_val, epochs=1, its=None,
     Update and return training the training history.
     """
     fname = inspect.stack()[0][3]
-    logger.debug('%s:' % (fname))
+    logger.debug('%s: starting' % (fname))
     if history is None:
         history = History()
     model = model.to(device=device)  # move the model parameters to CPU/GPU
-    window = None
-    for e in range(epochs):
-        for t, (x, y) in enumerate(loader_train):
-            break_its = its is not None and t > its
+    if its is None: its = len(loader_train)
+    for e in range(1, epochs+1):
+        for t, (x, y) in enumerate(loader_train, start=1):
             loss = train_batch(x, y, model, optimizer, device)
-            if t % log_every == 0 or break_its:
+            if t==1 or t % log_every == 0 or t == its:
                 _, train_acc = accuracy(loader_train, model, device, its=eval_its)
                 preds, val_acc = accuracy(loader_val, model, device, its=eval_its)
                 history.update(loss.item(), train_acc, val_acc, preds, vis)
                 if verbose:
-                    logger.info('%s: It %d, loss = %.4f' % (fname, t, loss.item()))
-                    logger.info('%s: Train acc \t= %.2f' % (fname, history.train_acc))
-                    logger.info('%s: Val acc \t= %.2f\n' % (fname, history.val_acc))
-            if break_its: break
+                    logger.info('%s: Epoch %d/%d, It %d/%d, loss = %.4f' % (fname, e, epochs, t, its, loss.item()))
+                    logger.info('%s: Train acc = %.2f' % (fname, history.train_acc))
+                    logger.info('%s: Val acc = %.2f\n' % (fname, history.val_acc))
+            if t == its: break
+    logger.debug('%s: ending' % (fname))
     return history
 
 def construct_model(parameters, im_shape, num_classes):
@@ -106,9 +106,10 @@ def construct_model(parameters, im_shape, num_classes):
             layers.append(torch.nn.BatchNorm2d(channels))
             layers.append(torch.nn.ReLU())
             pad = filter_size // 2
-            # TODO: stride and new im_size
-            layers.append(nn.Conv2d(channels, filter_count, filter_size, padding=pad))
-            #layers.append(nn.Dropout2d(parameters["Dropout"]))
+            stride = parameters["Stride"] if im_size // parameters["Stride"] >= 4 else 1
+            im_size //= stride
+            layers.append(nn.Conv2d(channels, filter_count, filter_size, stride=stride, padding=pad))
+            layers.append(nn.Dropout2d(parameters["Dropout"]))
         channels = filter_count
     
     # For each fc pattern.
@@ -142,9 +143,6 @@ class History(object):
             assert(preds.shape == self.preds[-1].shape)
         self.preds.append(preds)
         # Visualize.
-        X = [len(self.losses)]
-        Yl = [loss]
-        Ya = [[train_acc, val_acc]]
         if vis and not self.loss_window:
             opts = {
                 "title": "Model %d Loss" % self.id,
@@ -155,14 +153,17 @@ class History(object):
                 "ytickmin": 0,
                 "ytickmax": 5
                 }
-            self.loss_window = vis.line(Y=Yl, opts=opts)
+            self.loss_window = vis.line(Y=self.losses, opts=opts)
             opts["title"] = "Model %d Accuracy" % self.id
             opts["ylabel"] = "accuracy"
             opts["ytickmax"] = 100
-            self.acc_window = vis.line(Y=Ya, opts=opts)
+            opts["legend"] = ["Train", "Val"]
+            self.acc_window = vis.line(Y=list(zip(self.train_accs, self.val_accs)), opts=opts)
         elif vis:
-            vis.line(X=X, Y=Yl, win=self.loss_window, update='append')
-            vis.line(X=[[X[0], X[0]]], Y=Ya, win=self.acc_window, update='append')
+            x = len(self.losses)
+            vis.line(X=[x], Y=[loss], win=self.loss_window, update='append')
+            vis.line(X=[[x, x]], Y=[(train_acc, val_acc)], win=self.acc_window,
+                     update='append', opts={"legend": ["Train", "Val"]})
     def __lt__(self, other):
         return self.val_acc > other.val_acc # sort in decreasing order
     @property
@@ -176,4 +177,5 @@ class History(object):
         ln = self.losses[-1]
         l0 = self.losses[0]
         perc_dec = 100. * (l0 - ln) / l0
-        return perc_dec > 10. # working if improves by 10%
+        print("perc_dec =", perc_dec)
+        return perc_dec > 5. # working if improves by 5%

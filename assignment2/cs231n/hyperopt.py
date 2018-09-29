@@ -58,27 +58,31 @@ class HyperOpt(object):
         self.verbose = verbose
         self.device = device
         
-        # 
+        # Set of samples (choice indices) so don't repeat.
         self.samples = set([])
-        self.active = queue.PriorityQueue() # begin with no active
-        self.trained = queue.PriorityQueue() # begin with no trained
+
+        # Active annd trained model states.
+        self.active = queue.PriorityQueue()
+        self.trained = queue.PriorityQueue()
+
+        # Table columns and data for visualization.
         self.table_cols = ["id"] + list(choices.keys()) + \
             ["learn-rate", "train-acc", "val-acc"]
         self.table_data = []
 
+        # Visdom.
         self.vis = Visdom(port=port)
         assert self.vis.check_connection(), 'No connection could be formed quickly'
         self.vis.close()
         plt.close('all')
         self.matplot_win = None
-        #self.loss_wins = []
 
     def optimize(self):
         """
         Optimize hyperparameters.
         """
         fname = inspect.stack()[0][3]
-        logger.debug('%s:' % (fname))
+        logger.debug('%s: starting' % (fname))
         fine = False
         sampled_all = False
         while not (sampled_all and not self.active.qsize()):
@@ -94,8 +98,8 @@ class HyperOpt(object):
 
     def coarse_step(self):
         fname = inspect.stack()[0][3]
+        logger.debug('%s: starting' % (fname))
         # Sample parameters and check if this was sampled previously.
-        logger.debug('%s:' % (fname))
         lrs, parameter_inds, parameter_vals = [], {}, {}
         for (name, vals) in self.choices.items():
             ind = randint(0, len(vals))
@@ -107,13 +111,10 @@ class HyperOpt(object):
         self.samples.add(sample)
         
         # Find the right learning rate (if there is one).
-        lrs = []
-        while len(lrs) < 4:
-            lr = 10 ** np.random.randint(-6, 1)
-            if lr in lrs: continue
-            lrs.append(lr)
+        for lr in [10**v for v in range(-1, -4, -1)]:
             parameter_vals["learn-rate"] = lr
             model = self.constructor(parameter_vals, (3,32,32), 10) # TODO: don't hard code?
+            logger.debug("%s:%s" % (fname, str(model)))
             optimizer = optim.SGD(model.parameters(), lr=lr,
                                   momentum=0.9, nesterov=True)
             history = self.trainer(model, optimizer, self.loader_train,
@@ -124,14 +125,13 @@ class HyperOpt(object):
             self._add_to_table(parameter_vals, history)
             # If it's working, add it to our active set and break.
             if history.working:
-                logger.info("%s:\tlr = %.2E" % (fname, lr))
-                logger.info("%s:\t\tworking = %s" % (fname, history.working))
+                logger.info("%s:lr = %.2E" % (fname, lr))
                 self.active.put((history, model, optimizer, parameter_vals))
                 break
             
     def fine_step(self):
         fname = inspect.stack()[0][3]
-        logger.debug('%s:' % (fname))
+        logger.debug('%s: starting' % (fname))
         history, model, optimizer, parameter_vals = self.active.get_nowait()
         history = self.trainer(model, optimizer, self.loader_train,
                                self.loader_val, epochs=self.fine_epochs,
@@ -152,7 +152,8 @@ class HyperOpt(object):
         # Update table in visom.
         N, M = np.array(self.table_data).shape
         fig, ax = plt.subplots()
-        fig.set_figheight(2*N/8) # ewww
+        #fig.set_figheight(2*N/8) # ewww
+        fig.set_figheight(20) # ewww
         fig.set_figwidth(20)
         fig.patch.set_visible(False)
         ax.axis('off')
