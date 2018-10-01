@@ -1,11 +1,20 @@
 import inspect
 import logging
+import numpy as np
+from os.path import join
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import time
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+LOSSES = "losses.txt"
+TRAIN_ACCS = "train_accs.txt"
+VAL_ACCS = "val_accs.txt"
 
 def flatten(x):
     N = x.shape[0] # read in N, C, H, W
@@ -15,82 +24,29 @@ class Flatten(nn.Module):
     def forward(self, x):
         return flatten(x)
 
-def accuracy(loader, model, device, its=None):
-    """
-    Evaluate the model on the data in loader for a maximum of its
-    iterations (batches).
-    """
-    model.eval() # set each model to evaluation mode
-    num_correct = 0
-    num_samples = 0
-    preds = None
-    with torch.no_grad():
-        for (t, (x, y)) in enumerate(loader):
-            break_its = its is not None and t > its
-            x = x.to(device=device, dtype=torch.float32)  # move
-            y = y.to(device=device, dtype=torch.long)
-            scores = model(x)
-            _, p = scores.max(1)
-            if preds is None:
-                preds = p
-            else:
-                preds = torch.cat((preds, p))
-            num_correct += (p == y).sum()
-            num_samples += p.size(0)
-            if break_its: break
-    return preds, 100 * float(num_correct) / num_samples
-
-def train_batch(x, y, model, optimizer, device):
-    """
-    Train model on the given (x,y) batch given the optimizer.
-    """
-    model.train()  # put model to training mode
-    x = x.to(device=device, dtype=torch.float32)  # move to device, e.g. GPU
-    y = y.to(device=device, dtype=torch.long)
-    scores = model(x)
-    loss = F.cross_entropy(scores, y)
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    return loss
-
-def train(model, optimizer, loader_train, loader_val, epochs=1, its=None,
-          eval_its=None, log_every=100, verbose=False, device=None, history=None, vis=None):
-    """
-    Train the model for the given number of epochs and iterations on the data in
-    the loader_train.
-    
-    Evaluate every log_every on the data in loader_val.
-    
-    Update and return training the training history.
-    """
-    fname = inspect.stack()[0][3]
-    logger.debug('%s: starting' % (fname))
-    if history is None:
-        history = History()
-    model = model.to(device=device)  # move the model parameters to CPU/GPU
-    if its is None: its = len(loader_train)
-    for e in range(1, epochs+1):
-        for t, (x, y) in enumerate(loader_train, start=1):
-            loss = train_batch(x, y, model, optimizer, device)
-            if t==1 or t % log_every == 0 or t == its:
-                _, train_acc = accuracy(loader_train, model, device, its=eval_its)
-                preds, val_acc = accuracy(loader_val, model, device, its=eval_its)
-                history.update(loss.item(), train_acc, val_acc, preds, vis)
-                if verbose:
-                    logger.info('%s: Epoch %d/%d, It %d/%d, loss = %.4f' % (fname, e, epochs, t, its, loss.item()))
-                    logger.info('%s: Train acc = %.2f' % (fname, history.train_acc))
-                    logger.info('%s: Val acc = %.2f\n' % (fname, history.val_acc))
-            if t == its: break
-    logger.debug('%s: ending' % (fname))
-    return history
+def is_working(losses, thresh=10.):
+    if len(losses) <= 1:
+        return False
+    ln = min(losses)
+    l0 = losses[0]
+    if l0 < 1e-6:
+        return True
+    perc_dec = 100. * (l0 - ln) / l0
+    return perc_dec > thresh # working if improves by thresh%
 
 def construct_model(parameters, im_shape, num_classes):
-    fname = inspect.stack()[0][3]
+    """
+    Construct a model given parameters and image/class info.
     
+    Arguments:
+    - parameters: Parameter dictionary from name to value.
+    - im_shape: 3-tuple of (channels, rows, cols).
+    - num_classes: Number of classes.
+    """
+
     (channels, im_size, im_size2) = im_shape
     assert(im_size == im_size2)
-    
+
     layers = []
 
     # For each conv pattern.
@@ -111,7 +67,7 @@ def construct_model(parameters, im_shape, num_classes):
             layers.append(nn.Conv2d(channels, filter_count, filter_size, stride=stride, padding=pad))
             layers.append(nn.Dropout2d(parameters["Dropout"]))
         channels = filter_count
-    
+
     # For each fc pattern.
     layers.append(Flatten())
     in_dim = channels * im_size * im_size
@@ -124,58 +80,134 @@ def construct_model(parameters, im_shape, num_classes):
 
     return nn.Sequential(*layers)
 
-class History(object):
-    num = 0
-    def __init__(self):
-        History.num += 1 # not threadsafe, but yolo
-        self.id = History.num
-        self.losses = []
-        self.train_accs = []
-        self.val_accs = []
-        self.preds = []
-        self.loss_window = None
-    def update(self, loss, train_acc, val_acc, preds, vis):
-        # Update data.
-        self.losses.append(loss)
-        self.train_accs.append(train_acc)
-        self.val_accs.append(val_acc)
-        if self.preds:
-            assert(preds.shape == self.preds[-1].shape)
-        self.preds.append(preds)
-        # Visualize.
-        if vis and not self.loss_window:
-            opts = {
-                "title": "Model %d Loss" % self.id,
-                "xlabel": "iteration",
-                "ylabel": "loss",
-                "xtickmin": 0,
-                "xtickmax": 50,
-                "ytickmin": 0,
-                "ytickmax": 5
-                }
-            self.loss_window = vis.line(Y=self.losses, opts=opts)
-            opts["title"] = "Model %d Accuracy" % self.id
-            opts["ylabel"] = "accuracy"
-            opts["ytickmax"] = 100
-            opts["legend"] = ["Train", "Val"]
-            self.acc_window = vis.line(Y=list(zip(self.train_accs, self.val_accs)), opts=opts)
-        elif vis:
-            x = len(self.losses)
-            vis.line(X=[x], Y=[loss], win=self.loss_window, update='append')
-            vis.line(X=[[x, x]], Y=[(train_acc, val_acc)], win=self.acc_window,
-                     update='append', opts={"legend": ["Train", "Val"]})
-    def __lt__(self, other):
-        return self.val_acc > other.val_acc # sort in decreasing order
-    @property
-    def train_acc(self):
-        return self.train_accs[-1] if self.train_accs else None
-    @property
-    def val_acc(self):
-        return self.val_accs[-1] if self.val_accs else None
-    @property
-    def working(self):
-        ln = self.losses[-1]
-        l0 = self.losses[0]
-        perc_dec = 100. * (l0 - ln) / l0
-        print("perc_dec =", perc_dec)
-        return perc_dec > 5. # working if improves by 5%
+def accuracy(loader, model, device, iterations=None):
+    """
+    Evaluate the model on the data in loader.
+    
+    Arguments:
+    - loader: Data loader.
+    - model: PyTorch model.
+    - device: Device.
+    - iterations: Iterations.
+    """
+    model.eval() # set each model to evaluation mode
+    num_correct = 0
+    num_samples = 0
+    preds = None
+    if iterations is None:
+        iterations = len(loader_train)
+    with torch.no_grad():
+        for (it, (x, y)) in enumerate(loader):
+            x = x.to(device=device, dtype=torch.float32)  # move
+            y = y.to(device=device, dtype=torch.long)
+            scores = model(x)
+            _, p = scores.max(1)
+            if preds is None:
+                preds = p
+            else:
+                preds = torch.cat((preds, p))
+            num_correct += (p == y).sum()
+            num_samples += p.size(0)
+            if it > iterations:
+                break
+    return preds, 100 * float(num_correct) / num_samples
+
+def train_batch(x, y, model, optimizer, device):
+    """
+    Train model on the given (x,y) batch given the optimizer.
+    
+    Arguments:
+    - x: Data.
+    - y: Labels.
+    - optimizer: PyTorch optimizer.
+    - device: Device.
+    """
+    model.train()  # put model to training mode
+    x = x.to(device=device, dtype=torch.float32)  # move to device, e.g. GPU
+    y = y.to(device=device, dtype=torch.long)
+    scores = model(x)
+    loss = F.cross_entropy(scores, y)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return loss
+
+def train(loader_train, loader_val, model, optimizer,
+          logdir, log_every=100, verbose=False, vis=None,
+          epochs=1, iterations=None, eval_iterations=None, device=None):
+    """
+    Train the model given the optimizer, data, and other settings.
+    
+    Arguments:
+    - loader_train: Training data loader.
+    - loader_val: Validation data loader.
+    - model: PyTorch model.
+    - optimizer: PyTorch optimizer.
+    - logdir: Logging directory.
+    - log_every: How many iterations pass before logging.
+    - verbose: Whether to log to console.
+    - vis: Visualizer.
+    - epochs: How many training epochs.
+    - iterations: How many traing iterations.
+    - eval_iterations: How many validation iterations.
+    - device: Device.
+    - iterations: 
+    """
+    fname = inspect.stack()[0][3]
+    logger.debug('%s: starting' % (fname))
+    model = model.to(device=device)  # move the model parameters to CPU/GPU
+    if iterations is None:
+        iterations = len(loader_train)
+    losses = []
+    for e in range(1, epochs+1):
+        for it, (x, y) in enumerate(loader_train, start=1):
+            # Compute, log, and visualize the loss.
+            loss = train_batch(x, y, model, optimizer, device).item()
+            losses.append(loss)
+            open(join(logdir, LOSSES), "a").write("%f\n"%loss)
+            # Evaluate if it's a logging iteration or the end.
+            if it==1 or it % log_every == 0 or it == iterations:
+                _, train_acc = accuracy(loader_train, model, device, iterations=eval_iterations)
+                open(join(logdir, TRAIN_ACCS), "a").write("%f\n"%train_acc)
+                _, val_acc = accuracy(loader_val, model, device, iterations=eval_iterations)
+                open(join(logdir, VAL_ACCS), "a").write("%f\n"%val_acc)
+                if verbose:
+                    logger.info('%s: Epoch %d/%d, It %d/%d, loss = %.4f' % (fname, e, epochs, it, iterations, loss))
+                    logger.info('%s: Train acc = %.2f' % (fname, train_acc))
+                    logger.info('%s: Val acc = %.2f\n' % (fname, val_acc))
+            t0 = time.time()
+            if vis and it % 5 == 0: vis.update()
+            #print(time.time()-t0)
+            if it == iterations: break
+        # Save a checkpoint at the end of the epoch.
+        ch = Checkpoint(model, optimizer, e, val_acc)
+        ch_fname = join(logdir, "checkpoint-%02d-%03d.pt.tar" % (e, it))
+        ch.save(ch_fname)
+    vis.update(table=True)
+    logger.debug('%s: ending' % (fname))
+    return losses, ch
+
+class Checkpoint(object):
+    def __init__(self, model=None, optimizer=None, epoch=None, acc=None):
+        self.model = model
+        self.optimizer = optimizer
+        self.epoch = epoch
+        self.acc = acc
+    def save(self, filename):
+        fname = inspect.stack()[0][3]
+        logger.debug('%s' % fname)
+        r = {
+            "epoch": self.epoch,
+            "model": self.model,
+            "optimizer": self.optimizer,
+            "acc": self.acc
+            }
+        torch.save(r, filename)
+    def load(self, filename):
+        fname = inspect.stack()[0][3]
+        logger.debug('%s' % fname)
+        r = torch.load(filename)
+        self.model = r["model"]
+        self.optimizer = r["optimizer"]
+        self.epoch = r["epoch"]
+        self.acc = r["acc"]

@@ -1,10 +1,15 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import simplejson
 from builtins import range
+from math import sqrt, ceil
+from os.path import exists, join
 from past.builtins import xrange
 
-from math import sqrt, ceil
-import numpy as np
+from visdom import Visdom
 
-from cs231n.opt_utils import *
+from cs231n.train_utils import *
 
 class Visualizer(object):
     def __init__(self, logdir, port=6006):
@@ -16,7 +21,7 @@ class Visualizer(object):
         self.logdir = logdir
         self.data = {}
         self.windows = {}
-        self.table_cols = None
+        self.table_cols = []
         self.table_data = {}
     def __del__(self):
         plt.close('all')
@@ -28,43 +33,60 @@ class Visualizer(object):
             if model not in self.data:
                 self.data[model] = {LOSSES: [], TRAIN_ACCS: [], VAL_ACCS: []}
                 self.windows[model] = dict(loss=None, accs=None)
-            x, y = {}, {}
+            new_x, new_y = {}, {}
             for k in [LOSSES, TRAIN_ACCS, VAL_ACCS]:
                 fname = join(self.logdir, model, k)
                 if not exists(fname): continue
                 d = list(map(float, open(fname).readlines()))
-                x[k], y[k] = [], []
-                for i in range(len(self.data[model][k]), len(d)):
-                    x[k].append(i)
-                    y[k].append(d[i])
+                new_x[k], new_y[k] = [], []
+                N = len(self.data[model][k])
+                for i in range(N, len(d)):
+                    new_x[k].append(i)
+                    new_y[k].append(d[i])
                     self.data[model][k].append(d[i])
+            # Load table data for this model.
+            if table and self.data[model][TRAIN_ACCS]:
+                fname = join(self.logdir, model, "arch.json")
+                parameters = simplejson.load(open(fname))
+                id = int(model.replace("model", ""))
+                p = sorted(parameters.items())
+                self.table_cols = ["id"] + sorted(parameters.keys()) + \
+                    ["loss", "train acc", "val acc"]
+                row = [id]
+                row += [parameters[col] for col in self.table_cols if col in parameters]
+                row += [self.data[model][LOSSES][-1]]
+                row += [self.data[model][TRAIN_ACCS][-1]]
+                row += [self.data[model][VAL_ACCS][-1]]
+                self.table_data[model] = row
             # Continue if no new data or not working.
-            if not y[LOSSES] or not is_working(self.data[model][LOSSES]):
+            if not new_y[LOSSES] or not is_working(self.data[model][LOSSES]):
                 continue
             # Visualize plots for this model.
-            if LOSSES in x and x[LOSSES]:
+            if LOSSES in new_x and new_x[LOSSES]:
                 opts = {
                     "title": model,
                     #"xlabel": "iteration",
                     "ylabel": "loss",
                     "xtickmin": 0,
-                    "xtickmax": (1 + len(self.data[model][LOSSES]) // 1000) * 1000,
+                    "xtickmax": (1 + len(self.data[model][LOSSES]) // 100) * 100,
                     "ytickmin": 0,
                     "ytickmax": 5
                 }
                 w = self.windows[model]["loss"]
                 if not w:
-                    self.windows[model]["loss"] = self.vis.line(Y=self.data[model][LOSSES], opts=opts)
+                    y = self.data[model][LOSSES]
+                    x = list(range(len(y)))
+                    self.windows[model]["loss"] = self.vis.line(X=x, Y=y, opts=opts)
                 else:
-                    self.vis.line(X=x[LOSSES], Y=y[LOSSES], opts=opts,
-                                  win=w, update="append")                    
-            if TRAIN_ACCS in x and x[TRAIN_ACCS]:
+                    self.vis.line(X=new_x[LOSSES], Y=new_y[LOSSES], opts=opts,
+                                  win=w, update="append")
+            if TRAIN_ACCS in new_x and new_x[TRAIN_ACCS]:
                 opts = {
                     "title": model,
                     #"xlabel": "iteration",
                     "ylabel": "accuracy",
                     "xtickmin": 0,
-                    "xtickmax": (1 + len(self.data[model][TRAIN_ACCS]) // 100) * 100,
+                    "xtickmax": (1 + len(self.data[model][TRAIN_ACCS]) // 10) * 10,
                     "ytickmin": 0,
                     "ytickmax": 100,
                     "legend": ["Train", "Val"]
@@ -72,28 +94,14 @@ class Visualizer(object):
                 update = "append" if self.windows[model]["accs"] else None
                 w = self.windows[model]["accs"]
                 if not w:
-                    data = list(zip(self.data[model][TRAIN_ACCS], self.data[model][VAL_ACCS]))
-                    self.windows[model]["accs"] = self.vis.line(Y=data, opts=opts)
+                    y = list(zip(self.data[model][TRAIN_ACCS],
+                                 self.data[model][VAL_ACCS]))
+                    x = list(range(len(y)))
+                    self.windows[model]["accs"] = self.vis.line(X=x, Y=y, opts=opts)
                 else:
-                    self.vis.line(X=list(zip(x[TRAIN_ACCS], x[VAL_ACCS])),
-                                  Y=list(zip(y[TRAIN_ACCS], y[VAL_ACCS])),
+                    self.vis.line(X=list(zip(new_x[TRAIN_ACCS], new_x[VAL_ACCS])),
+                                  Y=list(zip(new_y[TRAIN_ACCS], new_y[VAL_ACCS])),
                                   opts=opts, win=w, update="append")
-            # Load table data for this model.
-            if table:
-                if self.data[model][TRAIN_ACCS]:
-                    fname = join(self.logdir, model, "arch.json")
-                    parameters = simplejson.load(open(fname))
-                    id = int(model.replace("model", ""))
-                    p = sorted(parameters.items())
-                    if not self.table_cols:
-                        self.table_cols = ["id"] + sorted(parameters.keys()) + \
-                            ["loss", "train acc", "val acc"]
-                    row = [id]
-                    row += [parameters[col] for col in self.table_cols if col in parameters]
-                    row += [self.data[model][LOSSES][-1]]
-                    row += [self.data[model][TRAIN_ACCS][-1]]
-                    row += [self.data[model][VAL_ACCS][-1]]
-                    self.table_data[model] = row
         # Visualize table data for all models.
         if table and self.table_data.values():
             # Sort by val acc.
@@ -101,8 +109,7 @@ class Visualizer(object):
             # Update table in visom.
             N, M = np.array(data).shape
             fig, ax = plt.subplots()
-            #fig.set_figheight(2*N/8) # ewww
-            fig.set_figheight(20) # ewww
+            fig.set_figheight(max(5, N/2)) # ewww
             fig.set_figwidth(20)
             fig.patch.set_visible(False)
             ax.axis('off')
