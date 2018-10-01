@@ -68,7 +68,7 @@ class Visualizer(object):
                     #"xlabel": "iteration",
                     "ylabel": "loss",
                     "xtickmin": 0,
-                    "xtickmax": (1 + len(self.data[model][LOSSES]) // 100) * 100,
+                    "xtickmax": (1 + len(self.data[model][LOSSES]) // 500) * 500,
                     "ytickmin": 0,
                     "ytickmax": 5
                 }

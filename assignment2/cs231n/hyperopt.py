@@ -19,7 +19,7 @@ logger.setLevel(logging.DEBUG)
 class HyperOpt(object):
     
     def __init__(self, choices, constructor, trainer, loader_train, loader_val, logdir,
-                 max_training=3, vis=True, verbose=True, coarse_its=None,
+                 max_coarse=3, vis=True, verbose=True, coarse_its=None,
                  fine_epochs=10, device=torch.device('cpu')):
         self.parameter_server = ParameterServer(choices, logdir)
         self.constructor = constructor
@@ -29,7 +29,7 @@ class HyperOpt(object):
         self.logdir = logdir
         if not exists(logdir):
             os.makedirs(logdir)
-        self.max_training = max_training
+        self.max_coarse = max_coarse
         self.vis = Visualizer(logdir) if vis else None
         self.verbose = verbose
         self.coarse_its = coarse_its
@@ -66,10 +66,10 @@ class HyperOpt(object):
     def optimize(self):
         fname = inspect.stack()[0][3]
         logger.debug('%s: entering' % (fname))
-        fine = len(self.coarse_trained) >= self.max_training
+        fine = len(self.coarse_trained) >= self.max_coarse
         while self.parameter_server.serving or self.coarse_trained:
             # If the coarse search is done, move to fine.
-            if not fine and (len(self.coarse_trained) == self.max_training \
+            if not fine and (len(self.coarse_trained) == self.max_coarse \
                                  or not self.parameter_server.serving):
                 fine = True
             # If the fine search is done, move to coarse.
@@ -94,6 +94,7 @@ class HyperOpt(object):
             model_name = "model%03d" % (len(os.listdir(self.logdir)) + 1)
             model_logdir = join(self.logdir, model_name)
             logger.debug('%s: %s with lr=%.3f' % (fname, model_name, lr))
+            logger.debug('%s: %s' % (fname, str(model)))
             if not exists(model_logdir):
                 os.makedirs(model_logdir)
             parameters["Rate"] = lr
@@ -111,8 +112,9 @@ class HyperOpt(object):
     
     def fine_step(self):
         fname = inspect.stack()[0][3]
-        logger.debug('%s: starting' % (fname))
-        check = sorted(self.coarse_trained, key=lambda x: x.acc)[-1]
+        self.coarse_trained = sorted(self.coarse_trained, key=lambda x: -x.acc)
+        check = self.coarse_trained.pop(0)
+        logger.debug('%s: %s' % (fname, check.logdir.split("/")[-1]))
         check = self.trainer(self.loader_train, self.loader_val, check.model, check.optimizer,
                              check.logdir, verbose=self.verbose, vis=self.vis,
                              epochs=self.fine_epochs, eval_iterations=16, device=self.device)
