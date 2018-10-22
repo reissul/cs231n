@@ -65,11 +65,15 @@ def construct_model(parameters, im_shape, num_classes):
             if im_size >= 8:
                 layers.append(torch.nn.MaxPool2d(2))
                 im_size //= 2
+        if parameters["Architecture"] == "conv-relu-batchnorm":
+            layers.append(nn.Conv2d(channels, filter_count, filter_size, stride=stride, padding=pad))
+            layers.append(torch.nn.ReLU())
+            layers.append(torch.nn.BatchNorm2d(filter_count))
         elif parameters["Architecture"] == "batchnorm-relu-conv":
             layers.append(torch.nn.BatchNorm2d(channels))
             layers.append(torch.nn.ReLU())
             layers.append(nn.Conv2d(channels, filter_count, filter_size, stride=stride, padding=pad))
-            layers.append(nn.Dropout2d(parameters["Dropout"]))
+            #layers.append(nn.Dropout2d(parameters["Dropout"]))
         im_size //= stride
         channels = filter_count
 
@@ -80,7 +84,7 @@ def construct_model(parameters, im_shape, num_classes):
     for fc_layer in range(M):
         out_dim = parameters["HiddenSize"] if fc_layer < M-1 else num_classes
         layers.append(nn.Linear(in_dim, out_dim))
-        #layers.append(nn.Dropout(parameters["Dropout"]))
+        layers.append(nn.Dropout(parameters["Dropout"]))
         in_dim = out_dim
 
     return nn.Sequential(*layers)
