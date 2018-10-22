@@ -55,17 +55,22 @@ def construct_model(parameters, im_shape, num_classes):
         # Filter size and filter count.
         filter_size = parameters["FilterSize"]
         filter_count = parameters["FilterCount"]
+        stride = parameters["Stride"] if im_size // parameters["Stride"] >= 4 else 1
+        pad = filter_size // 2
         # Architecture
         if parameters["Architecture"] == "conv-relu-pool":
-            continue
+            layers.append(nn.Conv2d(channels, filter_count, filter_size, stride=stride, padding=pad))
+            layers.append(torch.nn.BatchNorm2d(filter_count))
+            layers.append(torch.nn.ReLU())
+            if im_size >= 8:
+                layers.append(torch.nn.MaxPool2d(2))
+                im_size //= 2
         elif parameters["Architecture"] == "batchnorm-relu-conv":
             layers.append(torch.nn.BatchNorm2d(channels))
             layers.append(torch.nn.ReLU())
-            pad = filter_size // 2
-            stride = parameters["Stride"] if im_size // parameters["Stride"] >= 4 else 1
-            im_size //= stride
             layers.append(nn.Conv2d(channels, filter_count, filter_size, stride=stride, padding=pad))
             layers.append(nn.Dropout2d(parameters["Dropout"]))
+        im_size //= stride
         channels = filter_count
 
     # For each fc pattern.
