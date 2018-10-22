@@ -18,12 +18,10 @@ logger.setLevel(logging.DEBUG)
 
 class HyperOpt(object):
     
-    def __init__(self, choices, constructor, trainer, loader_train, loader_val, logdir,
+    def __init__(self, choices, loader_train, loader_val, logdir,
                  max_coarse=3, vis=True, verbose=True, coarse_its=None,
                  fine_epochs=10, device=torch.device('cpu')):
         self.parameter_server = ParameterServer(choices, logdir)
-        self.constructor = constructor
-        self.trainer = trainer
         self.loader_train = loader_train
         self.loader_val = loader_val
         self.logdir = logdir
@@ -90,7 +88,7 @@ class HyperOpt(object):
                 
         # Find the most aggressive learning rate that works.
         for lr in [10**v for v in range(-1, -4, -1)]:
-            model = self.constructor(parameters, (3,32,32), 10) # TODO: don't hard code?
+            model = construct_model(parameters, (3,32,32), 10) # TODO: don't hard code?
             model_name = "model%03d" % (len(os.listdir(self.logdir)) + 1)
             model_logdir = join(self.logdir, model_name)
             logger.debug('%s: %s with lr=%.3f' % (fname, model_name, lr))
@@ -101,10 +99,10 @@ class HyperOpt(object):
             simplejson.dump(parameters, open(join(model_logdir, "arch.json"), "w"))
             optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9,
                                   nesterov=True)
-            losses, checkpoint = self.trainer(self.loader_train, self.loader_val, model, optimizer, 
-                                              model_logdir, verbose=self.verbose, vis=self.vis, epochs=1,
-                                              iterations=self.coarse_its, eval_iterations=16,
-                                              device=self.device)
+            losses, checkpoint = train(self.loader_train, self.loader_val, model, optimizer, 
+                                       model_logdir, verbose=self.verbose, vis=self.vis, epochs=1,
+                                       iterations=self.coarse_its, eval_iterations=16,
+                                       device=self.device)
             checkpoint.logdir = model_logdir
             if is_working(losses):
                 self.coarse_trained.append(checkpoint)
@@ -115,7 +113,7 @@ class HyperOpt(object):
         self.coarse_trained = sorted(self.coarse_trained, key=lambda x: -x.acc)
         check = self.coarse_trained.pop(0)
         logger.debug('%s: %s' % (fname, check.logdir.split("/")[-1]))
-        check = self.trainer(self.loader_train, self.loader_val, check.model, check.optimizer,
-                             check.logdir, verbose=self.verbose, vis=self.vis,
-                             epochs=self.fine_epochs, eval_iterations=16, device=self.device)
+        check = train(self.loader_train, self.loader_val, check.model, check.optimizer,
+                      check.logdir, verbose=self.verbose, vis=self.vis,
+                      epochs=self.fine_epochs, eval_iterations=16, device=self.device)
         self.fine_trained.append(check)

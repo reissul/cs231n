@@ -77,16 +77,23 @@ def construct_model(parameters, im_shape, num_classes):
         im_size //= stride
         channels = filter_count
 
-    # For each fc pattern.
+    # For each fc layer before decision layer.
     layers.append(Flatten())
     in_dim = channels * im_size * im_size
     M = parameters["M"]
-    for fc_layer in range(M):
-        out_dim = parameters["HiddenSize"] if fc_layer < M-1 else num_classes
-        layers.append(nn.Linear(in_dim, out_dim))
+    for fc_layer in range(M-1):
+        out_dim = parameters["HiddenSize"]
         layers.append(nn.Dropout(parameters["Dropout"]))
+        layers.append(nn.Linear(in_dim, out_dim))
+        layers.append(nn.BatchNorm1d(out_dim))
+        layers.append(nn.ReLU())
         in_dim = out_dim
 
+    # For the decision layer.
+    if M:
+        layers.append(nn.Dropout(parameters["Dropout"]))
+        layers.append(nn.Linear(in_dim, num_classes))
+    
     return nn.Sequential(*layers)
 
 def accuracy(loader, model, device, iterations=None):
