@@ -87,7 +87,7 @@ class HyperOpt(object):
         parameters = self.parameter_server.serve()
                 
         # Find the most aggressive learning rate that works.
-        for lr in [10**v for v in range(-1, -4, -1)]:
+        for lr in [10**v for v in range(-3, -5, -1)]:
             model = construct_model(parameters, (3,32,32), 10) # TODO: don't hard code?
             model_name = "model%03d" % (len(os.listdir(self.logdir)) + 1)
             model_logdir = join(self.logdir, model_name)
@@ -97,8 +97,9 @@ class HyperOpt(object):
                 os.makedirs(model_logdir)
             parameters["Rate"] = lr
             simplejson.dump(parameters, open(join(model_logdir, "arch.json"), "w"))
-            optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9,
-                                  nesterov=True)
+            #optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9,
+            #                      nesterov=True)
+            optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-9)
             losses, checkpoint = train(self.loader_train, self.loader_val, model, optimizer, 
                                        model_logdir, verbose=self.verbose, vis=self.vis, epochs=1,
                                        iterations=self.coarse_its, eval_iterations=16,
